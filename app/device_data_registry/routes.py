@@ -83,7 +83,7 @@ class UploadData(Resource):
             hex_data = data.get('d')
             wall_adapter_id = data.get('g')
             gas_device_id = data.get('n')
-            additional_data = data.get('data', [])
+            additional_data = data.get('b', [])  # Changed from 'data' to 'b'
 
             if hex_data.startswith('4e'):
                 return self.process_bulk_data(hex_data, wall_adapter_id, gas_device_id)
@@ -283,6 +283,8 @@ class UploadData(Resource):
                     data=bytes.fromhex(wall_adapter_data + entry)
                 )
                 db.session.add(device_data)
+                if combined_data.get("weight"):
+                    device_data.update_gas_usage(combined_data["weight"])
 
                 results.append({
                     "status": "success",
@@ -351,7 +353,6 @@ class UploadData(Resource):
             last_log.end_timestamp = timestamp
             db.session.commit()
 
-
 @api.route('/user/<string:user_id>')
 class GetUserData(Resource):
     def get(self, user_id):
@@ -369,38 +370,19 @@ class GetUserData(Resource):
             for paired_device in paired_devices:
                 device = Device.query.filter_by(matx_id=paired_device.matx_id).first()
                 if not device:
-                    continue
+                    continue  # Skip if no device is found for the paired device
 
                 device_data_entries = DeviceData.query.filter_by(wall_adapter_id=device.wall_adapter_id).order_by(DeviceData.timestamp.desc()).all()
                 if not device_data_entries:
-                    continue
+                    continue  # Skip if no data entries are found for this device
 
                 for data in device_data_entries:
                     gmt_plus_3_time = data.timestamp + timedelta(hours=3)
                     hex_data = data.data.hex()
 
                     if hex_data.startswith('4e'):
-                        # Parse bulk data similar to POST endpoint
-                        match = re.match(r'4e([0-9a-f]{12})\[(.*?)\]', hex_data, re.IGNORECASE)
-                        if match:
-                            wall_adapter_data = match.group(1)
-                            gas_device_entries = match.group(2).split(',')
-
-                            wa_parsed_data = self.parse_data(wall_adapter_data, 'wall_adapter')
-                            
-                            for entry in gas_device_entries:
-                                gd_parsed_data = self.parse_data(entry, 'gas_device')
-                                combined_data = {
-                                    "device_id": device.wall_adapter_id,
-                                    "name": paired_device.name or "Unnamed Device",
-                                    "date": gmt_plus_3_time.strftime("%d/%m/%Y"),
-                                    "time": gmt_plus_3_time.strftime("%H:%M"),
-                                    **wa_parsed_data,
-                                    "gas_device_id": device.gas_device_id,
-                                    **gd_parsed_data,
-                                    "matx_id": device.matx_id
-                                }
-                                result.append(combined_data)
+                        bulk_data = self.parse_bulk_data(hex_data, device.wall_adapter_id, device.gas_device_id, paired_device.name, gmt_plus_3_time, device.matx_id)
+                        result.extend(bulk_data)
                     else:
                         parsed_data = self.parse_single_data(data.data, data.data[0:1].hex())
                         result.append({
@@ -462,6 +444,38 @@ class GetUserData(Resource):
             parsed_data["wall_adapter_message_count"] = struct.unpack('>I', b'\x00' + byte_data[4:7])[0]
 
         return parsed_data
+
+    def parse_bulk_data(self, hex_data, wall_adapter_id, gas_device_id, device_name, timestamp, matx_id):
+        match = re.match(r'4e([0-9a-f]{12})\[(.*?)\]', hex_data, re.IGNORECASE)
+        if not match:
+            return []
+
+        wall_adapter_data = match.group(1)
+        gas_device_entries = match.group(2).split(',')
+
+        wa_parsed_data = self.parse_data(wall_adapter_data, 'wall_adapter')
+        results = []
+
+        for entry in gas_device_entries:
+            gd_parsed_data = self.parse_data(entry, 'gas_device')
+            combined_data = {
+                "device_id": wall_adapter_id,
+                "name": device_name or "Unnamed Device",
+                "date": timestamp.strftime("%d/%m/%Y"),
+                "time": timestamp.strftime("%H:%M"),
+                "connection_type": wa_parsed_data["connection_type"],
+                "power_source": wa_parsed_data["power_source"],
+                "wa_battery_status": wa_parsed_data["wa_battery_status"],
+                "wa_message_count": wa_parsed_data["wa_message_count"],
+                "gas_device_id": gas_device_id,
+                "weight": gd_parsed_data["weight"],
+                "gd_battery_status": gd_parsed_data["gd_battery_status"],
+                "gd_message_count": gd_parsed_data["gd_message_count"],
+                "matx_id": matx_id
+            }
+            results.append(combined_data)
+
+        return results
 
     def parse_data(self, hex_data, data_type):
         connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
