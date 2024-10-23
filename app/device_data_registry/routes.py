@@ -83,7 +83,7 @@ class UploadData(Resource):
             hex_data = data.get('d')
             wall_adapter_id = data.get('g')
             gas_device_id = data.get('n')
-            additional_data = data.get('b', [])  # Changed from 'data' to 'b'
+            additional_data = data.get('b', [])
 
             if hex_data.startswith('4e'):
                 return self.process_bulk_data(hex_data, wall_adapter_id, gas_device_id)
@@ -146,6 +146,7 @@ class UploadData(Resource):
             logging.error(f"Error processing the request: {str(e)}")
             return {"status": "error", "message": "An error occurred while processing the request."}, 500
 
+
     def process_5e_data(self, hex_data, wall_adapter_id, gas_device_id, additional_data):
         try:
             wall_adapter_device = Device.query.filter_by(wall_adapter_id=wall_adapter_id).first()
@@ -204,6 +205,78 @@ class UploadData(Resource):
             logging.error(f"Error processing 5e data: {str(e)}")
             return {"status": "error", "message": f"An error occurred while processing 5e data: {str(e)}"}, 500
 
+    def process_bulk_data(self, hex_data, wall_adapter_id, gas_device_id):
+        try:
+            match = re.match(r'4e([0-9a-f]{12})\[(.*?)\]', hex_data, re.IGNORECASE)
+            if not match:
+                return {"status": "error", "message": "Invalid bulk data format."}, 400
+
+            wall_adapter_data = match.group(1)
+            gas_device_entries = match.group(2).split(',')
+
+            wall_adapter_device = Device.query.filter_by(wall_adapter_id=wall_adapter_id).first()
+            if not wall_adapter_device:
+                return {"status": "error", "message": "Invalid wall adapter device ID."}, 400
+
+            paired_device = PairedDevice.query.filter_by(matx_id=wall_adapter_device.matx_id).first()
+            if not paired_device:
+                return {"status": "error", "message": "Device is not paired with any user."}, 400
+
+            device_name = paired_device.name or "Unnamed Device"
+            results = []
+            current_time = datetime.now()
+
+            for entry in gas_device_entries:
+                # Store the complete data in a format that can be correctly parsed later
+                complete_data = f"4e{wall_adapter_data}{entry}"
+                byte_data = bytes.fromhex(complete_data)
+                
+                device_data = DeviceData(
+                    wall_adapter_id=wall_adapter_id,
+                    gas_device_id=gas_device_id,
+                    user_id=paired_device.user.id,
+                    matx_id=wall_adapter_device.matx_id,
+                    data=byte_data
+                )
+                db.session.add(device_data)
+
+                # Parse data for response
+                wa_data = self.parse_wall_adapter_data(wall_adapter_data)
+                gd_data = self.parse_gas_device_data(entry)
+
+                combined_data = {
+                    "device_id": wall_adapter_id,
+                    "name": device_name,
+                    "date": current_time.strftime("%d/%m/%Y"),
+                    "time": current_time.strftime("%H:%M"),
+                    "connection_type": wa_data["connection_type"],
+                    "power_source": wa_data["power_source"],
+                    "wa_battery_status": wa_data["battery_status"],
+                    "wa_message_count": wa_data["message_count"],
+                    "gas_device_id": gas_device_id,
+                    "weight": gd_data["weight"],
+                    "gd_battery_status": gd_data["battery_status"],
+                    "gd_message_count": gd_data["message_count"],
+                    "matx_id": wall_adapter_device.matx_id
+                }
+
+                results.append({
+                    "status": "success",
+                    "message": "Data uploaded successfully.",
+                    "data": combined_data
+                })
+
+            db.session.commit()
+            self.check_offline_status(wall_adapter_id, paired_device.user.email)
+
+            return results, 201
+
+        except Exception as e:
+            db.session.rollback()
+            logging.error(f"Error processing bulk data: {str(e)}")
+            return {"status": "error", "message": f"An error occurred while processing bulk data: {str(e)}"}, 500
+
+
     def parse_single_data(self, byte_data, message_type):
         connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
         power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
@@ -238,87 +311,6 @@ class UploadData(Resource):
             parsed_data["wall_adapter_message_count"] = struct.unpack('>I', b'\x00' + byte_data[4:7])[0]
 
         return parsed_data
-
-    def process_bulk_data(self, hex_data, wall_adapter_id, gas_device_id):
-        try:
-            match = re.match(r'4e([0-9a-f]{12})\[(.*?)\]', hex_data, re.IGNORECASE)
-            if not match:
-                return {"status": "error", "message": "Invalid bulk data format."}, 400
-
-            wall_adapter_data = match.group(1)
-            gas_device_entries = match.group(2).split(',')
-
-            wall_adapter_device = Device.query.filter_by(wall_adapter_id=wall_adapter_id).first()
-            if not wall_adapter_device:
-                return {"status": "error", "message": "Invalid wall adapter device ID."}, 400
-
-            paired_device = PairedDevice.query.filter_by(matx_id=wall_adapter_device.matx_id).first()
-            if not paired_device:
-                return {"status": "error", "message": "Device is not paired with any user."}, 400
-
-            device_name = paired_device.name or "Unnamed Device"
-            results = []
-
-            wa_parsed_data = self.parse_data(wall_adapter_data, 'wall_adapter')
-            current_time = datetime.now()
-
-            for entry in gas_device_entries:
-                gd_parsed_data = self.parse_data(entry, 'gas_device')
-                combined_data = {
-                    "device_id": wall_adapter_id,
-                    "name": device_name,
-                    "date": current_time.strftime("%d/%m/%Y"),
-                    "time": current_time.strftime("%H:%M"),
-                    **wa_parsed_data,
-                    "gas_device_id": gas_device_id,
-                    **gd_parsed_data,
-                    "matx_id": wall_adapter_device.matx_id
-                }
-
-                device_data = DeviceData(
-                    wall_adapter_id=wall_adapter_id,
-                    gas_device_id=gas_device_id,
-                    user_id=paired_device.user.id,
-                    matx_id=wall_adapter_device.matx_id,
-                    data=bytes.fromhex(wall_adapter_data + entry)
-                )
-                db.session.add(device_data)
-                if combined_data.get("weight"):
-                    device_data.update_gas_usage(combined_data["weight"])
-
-                results.append({
-                    "status": "success",
-                    "message": "Data uploaded successfully.",
-                    "data": combined_data
-                })
-
-            db.session.commit()
-            self.check_offline_status(wall_adapter_id, paired_device.user.email)
-
-            return results, 201
-
-        except Exception as e:
-            db.session.rollback()
-            logging.error(f"Error processing bulk data: {str(e)}")
-            return {"status": "error", "message": "An error occurred while processing bulk data."}, 500
-
-    def parse_data(self, hex_data, data_type):
-        connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
-        power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
-
-        if data_type == 'wall_adapter':
-            return {
-                "connection_type": connection_type_mapping.get(hex_data[0:2], "Unknown"),
-                "power_source": power_source_mapping.get(hex_data[2:4], "Unknown"),
-                "wa_battery_status": str(int(hex_data[4:6], 16)),
-                "wa_message_count": str(int(hex_data[6:12], 16))
-            }
-        elif data_type == 'gas_device':
-            return {
-                "weight": f"{int(hex_data[0:2], 16)}.{int(hex_data[2:4], 16):02d}",
-                "gd_battery_status": str(int(hex_data[4:6], 16)),
-                "gd_message_count": str(int(hex_data[6:12], 16))
-            }
 
     def check_offline_status(self, wall_adapter_id, user_email):
         current_time = datetime.utcnow()
@@ -353,6 +345,24 @@ class UploadData(Resource):
             last_log.end_timestamp = timestamp
             db.session.commit()
 
+    def parse_wall_adapter_data(self, hex_data):
+        connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
+        power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
+        
+        return {
+            "connection_type": connection_type_mapping.get(hex_data[0:2], "Unknown"),
+            "power_source": power_source_mapping.get(hex_data[2:4], "Unknown"),
+            "battery_status": str(int(hex_data[4:6], 16)),
+            "message_count": str(int(hex_data[6:12], 16))
+        }
+
+    def parse_gas_device_data(self, hex_data):
+        return {
+            "weight": f"{int(hex_data[0:2], 16)}.{int(hex_data[2:4], 16):02d}",
+            "battery_status": str(int(hex_data[4:6], 16)),
+            "message_count": str(int(hex_data[6:12], 16))
+        }
+
 @api.route('/user/<string:user_id>')
 class GetUserData(Resource):
     def get(self, user_id):
@@ -370,19 +380,41 @@ class GetUserData(Resource):
             for paired_device in paired_devices:
                 device = Device.query.filter_by(matx_id=paired_device.matx_id).first()
                 if not device:
-                    continue  # Skip if no device is found for the paired device
+                    continue
 
                 device_data_entries = DeviceData.query.filter_by(wall_adapter_id=device.wall_adapter_id).order_by(DeviceData.timestamp.desc()).all()
                 if not device_data_entries:
-                    continue  # Skip if no data entries are found for this device
+                    continue
 
                 for data in device_data_entries:
                     gmt_plus_3_time = data.timestamp + timedelta(hours=3)
                     hex_data = data.data.hex()
 
                     if hex_data.startswith('4e'):
-                        bulk_data = self.parse_bulk_data(hex_data, device.wall_adapter_id, device.gas_device_id, paired_device.name, gmt_plus_3_time, device.matx_id)
-                        result.extend(bulk_data)
+                        # Extract the wall adapter data and gas device entries
+                        match = re.match(r'4e([0-9a-f]{12})([0-9a-f]{12})', hex_data, re.IGNORECASE)
+                        if match:
+                            wa_data = match.group(1)
+                            gd_data = match.group(2)
+                            
+                            wa_parsed = self.parse_wall_adapter_data(wa_data)
+                            gd_parsed = self.parse_gas_device_data(gd_data)
+                            
+                            result.append({
+                                "device_id": device.wall_adapter_id,
+                                "name": paired_device.name or "Unnamed Device",
+                                "date": gmt_plus_3_time.strftime("%d/%m/%Y"),
+                                "time": gmt_plus_3_time.strftime("%H:%M"),
+                                "connection_type": wa_parsed["connection_type"],
+                                "power_source": wa_parsed["power_source"],
+                                "wa_battery_status": wa_parsed["battery_status"],
+                                "wa_message_count": wa_parsed["message_count"],
+                                "gas_device_id": device.gas_device_id,
+                                "weight": gd_parsed["weight"],
+                                "gd_battery_status": gd_parsed["battery_status"],
+                                "gd_message_count": gd_parsed["message_count"],
+                                "matx_id": device.matx_id
+                            })
                     else:
                         parsed_data = self.parse_single_data(data.data, data.data[0:1].hex())
                         result.append({
@@ -410,6 +442,24 @@ class GetUserData(Resource):
             logging.error(f"Error retrieving user data for user_id {user_id}: {str(e)}")
             return {"status": "error", "message": "An error occurred while retrieving the user data"}, 500
 
+    def parse_wall_adapter_data(self, hex_data):
+        connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
+        power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
+        
+        return {
+            "connection_type": connection_type_mapping.get(hex_data[0:2], "Unknown"),
+            "power_source": power_source_mapping.get(hex_data[2:4], "Unknown"),
+            "battery_status": str(int(hex_data[4:6], 16)),
+            "message_count": str(int(hex_data[6:12], 16))
+        }
+
+    def parse_gas_device_data(self, hex_data):
+        return {
+            "weight": f"{int(hex_data[0:2], 16)}.{int(hex_data[2:4], 16):02d}",
+            "battery_status": str(int(hex_data[4:6], 16)),
+            "message_count": str(int(hex_data[6:12], 16))
+        }
+
     def parse_single_data(self, byte_data, message_type):
         connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
         power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
@@ -424,7 +474,7 @@ class GetUserData(Resource):
             "gas_device_message_count": None
         }
 
-        if message_type in ["1d", "1e", "2e", "3e"]:  # 13 BYTES messages
+        if len(byte_data) >= 13:  # 13 BYTES messages
             parsed_data["connection_type"] = connection_type_mapping.get(byte_data[1:2].hex().lower(), "Unknown")
             parsed_data["power_source"] = power_source_mapping.get(byte_data[2:3].hex().lower(), "Unknown")
             parsed_data["wall_adapter_battery"] = int(byte_data[3])
@@ -437,60 +487,10 @@ class GetUserData(Resource):
             parsed_data["gas_device_battery"] = int(byte_data[9])
             parsed_data["gas_device_message_count"] = struct.unpack('>I', b'\x00' + byte_data[10:13])[0]
 
-        elif message_type in ["2d", "3d", "4d", "5d", "6d", "7d", "8d", "9d"]:  # 7 BYTES messages
+        elif len(byte_data) >= 7:  # 7 BYTES messages
             parsed_data["connection_type"] = connection_type_mapping.get(byte_data[1:2].hex().lower(), "Unknown")
             parsed_data["power_source"] = power_source_mapping.get(byte_data[2:3].hex().lower(), "Unknown")
             parsed_data["wall_adapter_battery"] = int(byte_data[3])
             parsed_data["wall_adapter_message_count"] = struct.unpack('>I', b'\x00' + byte_data[4:7])[0]
 
         return parsed_data
-
-    def parse_bulk_data(self, hex_data, wall_adapter_id, gas_device_id, device_name, timestamp, matx_id):
-        match = re.match(r'4e([0-9a-f]{12})\[(.*?)\]', hex_data, re.IGNORECASE)
-        if not match:
-            return []
-
-        wall_adapter_data = match.group(1)
-        gas_device_entries = match.group(2).split(',')
-
-        wa_parsed_data = self.parse_data(wall_adapter_data, 'wall_adapter')
-        results = []
-
-        for entry in gas_device_entries:
-            gd_parsed_data = self.parse_data(entry, 'gas_device')
-            combined_data = {
-                "device_id": wall_adapter_id,
-                "name": device_name or "Unnamed Device",
-                "date": timestamp.strftime("%d/%m/%Y"),
-                "time": timestamp.strftime("%H:%M"),
-                "connection_type": wa_parsed_data["connection_type"],
-                "power_source": wa_parsed_data["power_source"],
-                "wa_battery_status": wa_parsed_data["wa_battery_status"],
-                "wa_message_count": wa_parsed_data["wa_message_count"],
-                "gas_device_id": gas_device_id,
-                "weight": gd_parsed_data["weight"],
-                "gd_battery_status": gd_parsed_data["gd_battery_status"],
-                "gd_message_count": gd_parsed_data["gd_message_count"],
-                "matx_id": matx_id
-            }
-            results.append(combined_data)
-
-        return results
-
-    def parse_data(self, hex_data, data_type):
-        connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
-        power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
-
-        if data_type == 'wall_adapter':
-            return {
-                "connection_type": connection_type_mapping.get(hex_data[0:2], "Unknown"),
-                "power_source": power_source_mapping.get(hex_data[2:4], "Unknown"),
-                "wa_battery_status": str(int(hex_data[4:6], 16)),
-                "wa_message_count": str(int(hex_data[6:12], 16))
-            }
-        elif data_type == 'gas_device':
-            return {
-                "weight": f"{int(hex_data[0:2], 16)}.{int(hex_data[2:4], 16):02d}",
-                "gd_battery_status": str(int(hex_data[4:6], 16)),
-                "gd_message_count": str(int(hex_data[6:12], 16))
-            }
