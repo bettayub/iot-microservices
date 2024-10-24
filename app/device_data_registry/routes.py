@@ -105,12 +105,20 @@ class UploadData(Resource):
 
             user_email = paired_device.user.email
 
+            # Create DeviceData with all fields populated
             device_data = DeviceData(
                 wall_adapter_id=wall_adapter_id,
                 gas_device_id=gas_device_id,
                 user_id=paired_device.user.id,
                 matx_id=wall_adapter_device.matx_id,
-                data=byte_data
+                data=byte_data,
+                connection_type=parsed_data["connection_type"],
+                power_source=parsed_data["power_source"],
+                wa_battery_status=str(parsed_data["wall_adapter_battery"]),
+                wa_message_count=str(parsed_data["wall_adapter_message_count"]),
+                weight=parsed_data["weight"],
+                gd_battery_status=str(parsed_data["gas_device_battery"]),
+                gd_message_count=str(parsed_data["gas_device_message_count"])
             )
             db.session.add(device_data)
             db.session.commit()
@@ -181,12 +189,20 @@ class UploadData(Resource):
                         }
                         processed_data.append(data_entry)
 
+                        # Create DeviceData with all fields populated
                         device_data = DeviceData(
                             wall_adapter_id=entry.get('g', wall_adapter_id),
                             gas_device_id=entry.get('n', gas_device_id),
                             user_id=paired_device.user.id,
                             matx_id=wall_adapter_device.matx_id,
-                            data=byte_data
+                            data=byte_data,
+                            connection_type=parsed_data["connection_type"],
+                            power_source=parsed_data["power_source"],
+                            wa_battery_status=str(parsed_data["wall_adapter_battery"]),
+                            wa_message_count=str(parsed_data["wall_adapter_message_count"]),
+                            weight=parsed_data["weight"],
+                            gd_battery_status=str(parsed_data["gas_device_battery"]),
+                            gd_message_count=str(parsed_data["gas_device_message_count"])
                         )
                         db.session.add(device_data)
 
@@ -232,17 +248,25 @@ class UploadData(Resource):
                 complete_data = f"4e{wall_adapter_data}{entry}"
                 byte_data = bytes.fromhex(complete_data)
                 
+                wa_data = self._parse_wall_adapter_data(wall_adapter_data)
+                gd_data = self._parse_gas_device_data(entry)
+
+                # Create DeviceData with all fields populated
                 device_data = DeviceData(
                     wall_adapter_id=wall_adapter_id,
                     gas_device_id=gas_device_id,
                     user_id=paired_device.user.id,
                     matx_id=wall_adapter_device.matx_id,
-                    data=byte_data
+                    data=byte_data,
+                    connection_type=wa_data["connection_type"],
+                    power_source=wa_data["power_source"],
+                    wa_battery_status=wa_data["battery_status"],
+                    wa_message_count=wa_data["message_count"],
+                    weight=gd_data["weight"],
+                    gd_battery_status=gd_data["battery_status"],
+                    gd_message_count=gd_data["message_count"]
                 )
                 db.session.add(device_data)
-
-                wa_data = self._parse_wall_adapter_data(wall_adapter_data)
-                gd_data = self._parse_gas_device_data(entry)
 
                 combined_data = {
                     "device_id": wall_adapter_id,
@@ -275,7 +299,7 @@ class UploadData(Resource):
             db.session.rollback()
             logging.error(f"Error processing bulk data: {str(e)}")
             return {"status": "error", "message": f"An error occurred while processing bulk data: {str(e)}"}, 500
-
+        
     def _parse_single_data(self, byte_data, message_type):
         connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}
         power_source_mapping = {"c8": "Electricity", "c9": "Battery"}
@@ -310,7 +334,7 @@ class UploadData(Resource):
             parsed_data["wall_adapter_message_count"] = struct.unpack('>I', b'\x00' + byte_data[4:7])[0]
 
         return parsed_data
-
+        
     def _check_offline_status(self, wall_adapter_id, user_email):
         current_time = datetime.utcnow()
         
@@ -343,6 +367,7 @@ class UploadData(Resource):
             last_log.offline_message_count += 1
             last_log.end_timestamp = timestamp
             db.session.commit()
+        
 
     def _parse_wall_adapter_data(self, hex_data):
         connection_type_mapping = {"df": "NB-IoT", "de": "Wi-Fi"}

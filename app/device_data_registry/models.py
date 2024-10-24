@@ -13,15 +13,34 @@ class DeviceData(db.Model):
     gas_device_id = db.Column(db.String(50), nullable=False)
     user_id = db.Column(db.String(36), nullable=False)
     matx_id = db.Column(db.String(36), nullable=False)
-    data = db.Column(db.LargeBinary)  # Binary data from the device
+    data = db.Column(db.LargeBinary)  # Original binary data from the device
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # New columns for decoded data
+    connection_type = db.Column(db.String(20))
+    power_source = db.Column(db.String(20))
+    wa_battery_status = db.Column(db.String(10))
+    wa_message_count = db.Column(db.String(20))
+    weight = db.Column(db.String(10))
+    gd_battery_status = db.Column(db.String(10))
+    gd_message_count = db.Column(db.String(20))
 
-    def __init__(self, wall_adapter_id, gas_device_id, user_id, matx_id, data):
+    def __init__(self, wall_adapter_id, gas_device_id, user_id, matx_id, data, 
+                 connection_type=None, power_source=None, wa_battery_status=None, 
+                 wa_message_count=None, weight=None, gd_battery_status=None, 
+                 gd_message_count=None):
         self.wall_adapter_id = wall_adapter_id
         self.gas_device_id = gas_device_id
         self.user_id = user_id
         self.matx_id = matx_id
         self.data = data
+        self.connection_type = connection_type
+        self.power_source = power_source
+        self.wa_battery_status = wa_battery_status
+        self.wa_message_count = wa_message_count
+        self.weight = weight
+        self.gd_battery_status = gd_battery_status
+        self.gd_message_count = gd_message_count
 
     def calculate_remaining_gas(self, current_weight, cylinder):
         """
